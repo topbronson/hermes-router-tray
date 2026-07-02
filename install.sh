@@ -29,10 +29,15 @@ HR_BIN_PATH="$(command -v hr || true)"
 # to an existing file) so we don't get tricked by a broken self-symlink
 # left over from a previous failed install.
 INDICATOR_PY=""
-if [[ -n "$(readlink -e "$HOME/.local/bin/hermes-router-indicator" 2>/dev/null)" ]]; then
-    INDICATOR_PY="/usr/bin/python3"
-elif [[ -n "$(readlink -e "$REPO_ROOT/.venv/bin/hermes-router-indicator" 2>/dev/null)" ]]; then
+if [[ -n "$(readlink -e "$REPO_ROOT/.venv/bin/hermes-router-indicator" 2>/dev/null)" ]]; then
+    # venv install: use the venv's python. The console script under
+    # ~/.local/bin/ is usually a symlink to the venv one, but the
+    # actual interpreter must be the venv python for hermes_tray /
+    # Pillow to be importable.
     INDICATOR_PY="$REPO_ROOT/.venv/bin/python3"
+elif [[ -n "$(readlink -e "$HOME/.local/bin/hermes-router-indicator" 2>/dev/null)" ]]; then
+    # pip install --user to a system python: use that system python.
+    INDICATOR_PY="/usr/bin/python3"
 elif [[ -x "$REPO_ROOT/.venv/bin/python3" ]]; then
     INDICATOR_PY="$REPO_ROOT/.venv/bin/python3"
 else
