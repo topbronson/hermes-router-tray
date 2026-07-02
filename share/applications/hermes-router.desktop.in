@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Hermes Router
+GenericName=AI Load Balancer
+Comment=Hermes Router tray controller (right-click for menu)
+Exec=__EXEC_LINE__
+Icon=hermes-router-circle
+Terminal=false
+Categories=Network;Utility;
+StartupNotify=false
+Keywords=hermes;router;ai;load-balancer;

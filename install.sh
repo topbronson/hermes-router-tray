@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Install the Hermes Router tray indicator.
+#
+# Usage:
+#   ./install.sh                       # install to ~/.local (default)
+#   PREFIX=/usr/local ./install.sh     # install to /usr/local
+#   HERMES_ROUTER_HOST=100.x.x.x ./install.sh   # override detected host
+#
+# Re-running is safe; existing files are overwritten in place.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+PREFIX="${PREFIX:-$HOME/.local}"
+SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+BIN_DIR="$PREFIX/bin"
+SHARE_DIR="$PREFIX/share"
+APPS_DIR="$SHARE_DIR/applications"
+AUTOSTART_DIR="$SHARE_DIR/autostart"
+ICON_DIR="$SHARE_DIR/icons/hicolor/256x256/apps"
+SVG_DIR="$SHARE_DIR/icons/hicolor/scalable/apps"
+
+# Resolve the hr binary path for HERMES_ROUTER_BIN injection
+HR_BIN_PATH="$(command -v hr || true)"
+EXEC_LINE="/usr/bin/python3 $BIN_DIR/hermes-router-indicator"
+if [[ -n "$HR_BIN_PATH" && "$HR_BIN_PATH" != "$PREFIX/bin/hr" ]]; then
+    EXEC_LINE="/usr/bin/env HERMES_ROUTER_BIN=${HR_BIN_PATH} $EXEC_LINE"
+fi
+
+# -----------------------------------------------------------------------------
+# Check that hr is installed
+# -----------------------------------------------------------------------------
+if [[ -z "$HR_BIN_PATH" ]]; then
+    cat <<EOF
+Warning: 'hr' is not on PATH. The Hermes-router is the free-tier AI
+load-balancer; you need to install it before this indicator can manage it.
+
+Install with the upstream one-liner:
+
+    curl -fsSL https://raw.githubusercontent.com/Shaf2665/Hermes-router/main/get.sh | bash
+
+Or see https://github.com/Shaf2665/Hermes-router for details.
+
+The indicator will still install and run, but it won't be able to
+start/stop the router until 'hr' is on PATH.
+EOF
+fi
+
+# -----------------------------------------------------------------------------
+# Auto-detect HERMES_ROUTER_HOST
+# -----------------------------------------------------------------------------
+# The router's own .env (installed at ~/.local/share/hermes-router/.env by
+# the upstream one-liner) is the source of truth. Read the HOST= line.
+# Falls back to the env var, then to "localhost".
+DETECTED_ROUTER_HOST="$(grep -E '^HOST=' "$HOME/.local/share/hermes-router/.env" 2>/dev/null \
+    | head -1 | cut -d= -f2 || true)"
+HERMES_ROUTER_HOST="${HERMES_ROUTER_HOST:-${DETECTED_ROUTER_HOST:-localhost}}"
+echo "Hermes-router host: $HERMES_ROUTER_HOST"
+
+# -----------------------------------------------------------------------------
+# Auto-disable auto-start if the router is already a systemd service
+# -----------------------------------------------------------------------------
+# If the user has run `hr service install`, the router is already managed
+# by its own systemd service — starting it again from the indicator would
+# race for port 8319. In that case, set HERMES_ROUTER_AUTO_START=0 in the
+# unit so the indicator only supervises, not auto-starts.
+if [[ -f "$HOME/.config/systemd/user/hermes-router.service" ]]; then
+    AUTO_START="0"
+    echo "Detected hermes-router.service — auto-start disabled to avoid port race."
+else
+    AUTO_START="1"
+fi
+
+# -----------------------------------------------------------------------------
+# Detect hermes-gateway.service
+# -----------------------------------------------------------------------------
+if [[ -f "$HOME/.config/systemd/user/hermes-gateway.service" ]]; then
+    WANTED_BY="hermes-gateway.service"
+    SYSTEMD_WANTS_DIR="$SYSTEMD_USER_DIR/hermes-gateway.service.wants"
+    echo "Detected hermes-gateway.service — indicator will start alongside it."
+else
+    WANTED_BY="default.target"
+    SYSTEMD_WANTS_DIR="$SYSTEMD_USER_DIR/default.target.wants"
+    echo "No hermes-gateway.service found — indicator will start at every login."
+fi
+
+echo
+echo "Installing to PREFIX=$PREFIX"
+echo "  bin:        $BIN_DIR"
+echo "  apps:       $APPS_DIR"
+echo "  autostart:  $AUTOSTART_DIR"
+echo "  icons:      $ICON_DIR"
+echo "  systemd:    $SYSTEMD_USER_DIR/hermes-router-indicator.service"
+
+mkdir -p "$BIN_DIR" "$APPS_DIR" "$AUTOSTART_DIR" "$ICON_DIR" "$SVG_DIR" "$SYSTEMD_WANTS_DIR"
+
+# Copy the indicator console-script
+if [[ -x "$HOME/.local/bin/hermes-router-indicator" ]]; then
+    ln -sf "$HOME/.local/bin/hermes-router-indicator" "$BIN_DIR/hermes-router-indicator"
+else
+    echo "Warning: hermes-router-indicator not found in ~/.local/bin"
+    echo "         (run 'pip install --user -e .' in the repo first)"
+fi
+
+# Render .desktop templates
+sed "s|__EXEC_LINE__|$EXEC_LINE|g" \
+    "$REPO_ROOT/share/applications/hermes-router.desktop.in" \
+    > "$APPS_DIR/hermes-router.desktop"
+
+sed "s|__EXEC_LINE__|$EXEC_LINE|g" \
+    "$REPO_ROOT/share/autostart/hermes-router-autostart.desktop.in" \
+    > "$AUTOSTART_DIR/hermes-router-autostart.desktop"
+
+# Render and install systemd service
+sed \
+    -e "s|__EXEC_LINE__|$EXEC_LINE|g" \
+    -e "s|__HERMES_ROUTER_HOST__|$HERMES_ROUTER_HOST|g" \
+    -e "s|__WANTED_BY__|$WANTED_BY|g" \
+    "$REPO_ROOT/share/systemd/hermes-router-indicator.service.in" \
+    > "$SYSTEMD_USER_DIR/hermes-router-indicator.service"
+
+# Inject AUTO_START override (if needed) as a second Environment= line
+if [[ "$AUTO_START" == "0" ]]; then
+    sed -i "s|^Environment=\"HERMES_ROUTER_HOST=.*$|&\nEnvironment=\"HERMES_ROUTER_AUTO_START=0\"|" \
+        "$SYSTEMD_USER_DIR/hermes-router-indicator.service"
+fi
+
+# Symlink into the WantedBy target
+ln -sf "$SYSTEMD_USER_DIR/hermes-router-indicator.service" \
+    "$SYSTEMD_WANTS_DIR/hermes-router-indicator.service"
+
+# Copy icons (skip if not yet generated — user regenerates later)
+cp -n "$ICON_DIR"/hermes-router-*.png "$ICON_DIR/" 2>/dev/null || true
+
+# Refresh caches (best-effort)
+command -v update-desktop-database >/dev/null && \
+    update-desktop-database "$APPS_DIR" 2>/dev/null || true
+command -v gtk-update-icon-cache >/dev/null && \
+    gtk-update-icon-cache -f -t "$SHARE_DIR/icons/hicolor" 2>/dev/null || true
+
+echo
+echo "Installed."
+echo
+echo "Next steps:"
+if [[ -d "$HOME/.config/systemd/user" ]]; then
+    echo "  1. Reload systemd:    systemctl --user daemon-reload"
+    echo "  2. Enable & start:    systemctl --user enable --now hermes-router-indicator.service"
+    echo
+    echo "  To check status:      systemctl --user status hermes-router-indicator.service"
+    echo "  To view logs:         journalctl --user -u hermes-router-indicator -f"
+fi
+echo "  - If icons are missing, regenerate them:"
+echo "      cd $REPO_ROOT"
+echo "      python3 scripts/make-text-icon.py"
+echo "      python3 scripts/make-status-icons.py"

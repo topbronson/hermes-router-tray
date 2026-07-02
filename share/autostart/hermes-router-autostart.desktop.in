@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Hermes Router
+GenericName=AI Load Balancer
+Comment=Auto-start the Hermes Router tray indicator at login
+Exec=__EXEC_LINE__
+Icon=hermes-router-circle
+Terminal=false
+Categories=Network;Utility;
+StartupNotify=false
+X-GNOME-Autostart-Delay=5
+X-GNOME-Autostart-enabled=true
+Keywords=hermes;router;ai;load-balancer;
