@@ -25,10 +25,13 @@ HR_BIN_PATH="$(command -v hr || true)"
 # Pick the Python interpreter that has hermes-tray-lib + the indicator
 # package importable. Drives both EXEC_LINE (for the .desktop and
 # systemd units) and the wrapper-shim shebang.
+# We use `readlink -e` (which returns nothing if the path doesn't resolve
+# to an existing file) so we don't get tricked by a broken self-symlink
+# left over from a previous failed install.
 INDICATOR_PY=""
-if [[ -x "$HOME/.local/bin/hermes-router-indicator" ]]; then
+if [[ -n "$(readlink -e "$HOME/.local/bin/hermes-router-indicator" 2>/dev/null)" ]]; then
     INDICATOR_PY="/usr/bin/python3"
-elif [[ -x "$REPO_ROOT/.venv/bin/hermes-router-indicator" ]]; then
+elif [[ -n "$(readlink -e "$REPO_ROOT/.venv/bin/hermes-router-indicator" 2>/dev/null)" ]]; then
     INDICATOR_PY="$REPO_ROOT/.venv/bin/python3"
 elif [[ -x "$REPO_ROOT/.venv/bin/python3" ]]; then
     INDICATOR_PY="$REPO_ROOT/.venv/bin/python3"
@@ -64,23 +67,35 @@ fi
 # Auto-detect HERMES_ROUTER_HOST
 # -----------------------------------------------------------------------------
 # The router's own .env (installed at ~/.local/share/hermes-router/.env by
-# the upstream one-liner) is the source of truth. Read the HOST= line.
-# Falls back to the env var, then to "localhost".
+# the upstream one-liner) is the source of truth. If that doesn't exist or
+# doesn't have HOST=, fall back to the user's Tailscale IPv4 address. Final
+# fallback: localhost.
 DETECTED_ROUTER_HOST="$(grep -E '^HOST=' "$HOME/.local/share/hermes-router/.env" 2>/dev/null \
     | head -1 | cut -d= -f2 || true)"
+if [[ -z "$DETECTED_ROUTER_HOST" ]]; then
+    DETECTED_ROUTER_HOST="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+fi
 HERMES_ROUTER_HOST="${HERMES_ROUTER_HOST:-${DETECTED_ROUTER_HOST:-localhost}}"
 echo "Hermes-router host: $HERMES_ROUTER_HOST"
 
 # -----------------------------------------------------------------------------
-# Auto-disable auto-start if the router is already a systemd service
+# Auto-disable auto-start if the router is already running
 # -----------------------------------------------------------------------------
-# If the user has run `hr service install`, the router is already managed
-# by its own systemd service — starting it again from the indicator would
-# race for port 8319. In that case, set HERMES_ROUTER_AUTO_START=0 in the
-# unit so the indicator only supervises, not auto-starts.
+# The router is managed by a unit file if `hr service install` was run, OR
+# if the router is already listening on its port (started manually, or as
+# a long-running detached process). In either case, the indicator should
+# only supervise — not auto-start, which would race for port 8319.
+ROUTER_ALREADY_RUNNING=false
 if [[ -f "$HOME/.config/systemd/user/hermes-router.service" ]]; then
-    AUTO_START="0"
+    ROUTER_ALREADY_RUNNING=true
     echo "Detected hermes-router.service — auto-start disabled to avoid port race."
+elif ss -tln 2>/dev/null | grep -q ':8319 '; then
+    ROUTER_ALREADY_RUNNING=true
+    echo "Detected router already listening on port 8319 — auto-start disabled."
+fi
+
+if [[ "$ROUTER_ALREADY_RUNNING" == "true" ]]; then
+    AUTO_START="0"
 else
     AUTO_START="1"
 fi
@@ -116,15 +131,26 @@ mkdir -p "$BIN_DIR" "$APPS_DIR" "$AUTOSTART_DIR" "$ICON_DIR" "$SVG_DIR" "$SYSTEM
 #      This makes ./install.sh work without a `pip install --user` step
 #      on systems where pip is unavailable (Ubuntu 24.04+ ships
 #      without pip by default).
+#
+# We use `readlink -e` (which returns nothing for broken symlinks) so
+# we don't get tricked by a stale self-symlink from a previous failed
+# install.
 INDICATOR_BIN=""
-if [[ -x "$HOME/.local/bin/hermes-router-indicator" ]]; then
+if [[ -n "$(readlink -e "$HOME/.local/bin/hermes-router-indicator" 2>/dev/null)" ]]; then
     INDICATOR_BIN="$HOME/.local/bin/hermes-router-indicator"
-elif [[ -x "$REPO_ROOT/.venv/bin/hermes-router-indicator" ]]; then
+elif [[ -n "$(readlink -e "$REPO_ROOT/.venv/bin/hermes-router-indicator" 2>/dev/null)" ]]; then
     INDICATOR_BIN="$REPO_ROOT/.venv/bin/hermes-router-indicator"
 fi
 
 if [[ -n "$INDICATOR_BIN" ]]; then
-    ln -sf "$INDICATOR_BIN" "$BIN_DIR/hermes-router-indicator"
+    # Only create the symlink if the source is actually somewhere different
+    # from the destination. If both are ~/.local/bin/hermes-...-indicator
+    # (the pip --user case with default PREFIX), `ln -sf A A` would
+    # create a self-referencing symlink that systemd then fails to open.
+    if [[ "$(readlink -f "$INDICATOR_BIN" 2>/dev/null || echo "$INDICATOR_BIN")" \
+            != "$(readlink -f "$BIN_DIR/hermes-router-indicator" 2>/dev/null || echo "$BIN_DIR/hermes-router-indicator")" ]]; then
+        ln -sf "$INDICATOR_BIN" "$BIN_DIR/hermes-router-indicator"
+    fi
 else
     # Create a wrapper shim. See the matching comment in the Mnemosyne
     # install.sh for the design rationale.
